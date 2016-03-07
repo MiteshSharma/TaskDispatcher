@@ -1,5 +1,8 @@
 package com.myth.taskdispatcher;
 
+import android.os.Handler;
+import android.os.Looper;
+
 import java.util.Comparator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -11,61 +14,74 @@ import java.util.concurrent.PriorityBlockingQueue;
 public class TaskDispatcher {
     protected PriorityBlockingQueue<ITask> messageQueue = null;
     ExecutorService executorService;
+    Handler mainHandler;
 
     public TaskDispatcher() {
-        if (messageQueue == null) {
-            messageQueue = new PriorityBlockingQueue<ITask>(10, new TaskComparator());
-        }
-        executorService = Executors.newSingleThreadExecutor();
-        executorService.execute(createWrapper());
     }
 
-    private class TaskComparator implements Comparator<ITask> {
+    private Handler getHandler() {
+        if (mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
+        return mainHandler;
+    }
+
+    private void runOnCompleteInUiThread(final ITask task) {
+        this.getHandler().post(new Runnable() {
+            @Override
+            public void run() {
+                task.onUiThreadComplete();
+            }
+        });
+    }
+
+    private PriorityBlockingQueue getMessageQueue() {
+        if (messageQueue == null) {
+            messageQueue = new PriorityBlockingQueue<ITask>(10, new TaskComparator());
+            executorService = Executors.newSingleThreadExecutor();
+            executorService.execute(createWrapper());
+        }
+        return messageQueue;
+    }
+
+    private static class TaskComparator implements Comparator<ITask> {
         @Override
         public int compare(ITask lhs, ITask rhs) {
             return (lhs.getPriority() > rhs.getPriority()) ? 1 : -1;
         }
     }
 
+    // BlockingQueue implementations are thread-safe.
+    // so no need to synchronize.
     public void execute(ITask task) {
-        synchronized (messageQueue) {
-            messageQueue.add(task);
-            messageQueue.notify();
-        }
+        this.getMessageQueue().add(task);
     }
 
     private Runnable createWrapper(){
         Runnable runnable = new Runnable() {
             @Override
             public void run() {
-                ITask activeTask ;
+                ITask activeTask = null ;
                 while(true) {
-                    activeTask = null ;
-                    synchronized (messageQueue) {
-                        if(messageQueue.size() > 0) {
-                            activeTask = messageQueue.peek();
-                        }
-                        // First sleep before we can add any further request and wake up
-                        if(activeTask == null) {
-                            try {
-                                messageQueue.wait() ;
-                            } catch(InterruptedException e) {
-                                e.printStackTrace() ;
-                            }
-                        }
+                    try {
+                        /**
+                         * Retrieves and removes the head of this queue, waiting
+                         * if necessary until an element becomes available.
+                         */
+                        activeTask = messageQueue.take() ;
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
                     }
-
                     if(activeTask != null) {
                         try{
                             activeTask.run() ;
                         }catch(Throwable e) {
                             e.printStackTrace();
                         }finally{
+                            // Runs on same thread.
                             activeTask.onComplete();
-                            synchronized (activeTask) {
-                                if(messageQueue.size() > 0)
-                                    messageQueue.poll() ;
-                            }
+                            // Runs on main thread.
+                            runOnCompleteInUiThread(activeTask);
                         }
                     }
                 }
